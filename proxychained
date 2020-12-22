@@ -1,0 +1,136 @@
+#!/usr/bin/ruby
+
+require 'ipaddr'
+require 'uri'
+require 'optparse'
+require 'tempfile'
+
+options = {
+  'chain_type' => 'strict_chain',
+  'chain_length' => nil,
+  'quiet' => false,
+  'proxy_dns' => true,
+  'remote_dns_subnet' => 224,
+  'tcp_connect_time_out' => 15000,
+  'tcp_read_time_out' => 8000,
+  'localnet' => [],
+  'proxies' => [],
+}
+
+parser = OptionParser.new do |opts|
+  opts.banner = "usage: #{$0} [options]"
+
+  opts.on '-tTYPE', '--type TYPE', 'chain type' do |t|
+    if not ['strict', 'dynamic', 'random', 'round_robin'].include? t
+      raise 'Invalid chain type expected either strict, dynamic, random or round_robin.'
+    end
+
+    options['chain_type'] = "#{t}_chain"
+  end
+
+  opts.on '-nLENGTH', '--length LENGTH', Integer, 'chain length' do |n|
+    options['chain_length'] = n
+  end
+
+  opts.on '-q', '--quiet', 'quiet mode' do |q|
+    options['quiet'] = q
+  end
+
+  opts.on '-r', '--no-dns', 'disable proxy dns' do |r|
+    options['proxy_dns'] = r
+  end
+
+  opts.on '-sSUBNET', '--dns-subnet SUBNET', Integer, 'remote dns subnet' do |s|
+    unless (0..255) === s
+      raise 'Invalid DNS subnet.'
+    end
+
+    options['remote_dns_subnet'] = s
+  end
+
+  opts.on '-wTIMEOUT', '--connect-timeout TIMEOUT', Float,
+          'tcp connection timeout' do |w|
+    options['tcp_connect_time_out'] = w
+  end
+
+  opts.on '-WTIMEOUT', '--read-timeout TIMEOUT', Float,
+          'tcp read timeout' do |w|
+    options['tcp_read_time_out'] = w
+  end
+
+  opts.on '-lLOCAL', '--local LOCAL', 'local network address' do |l|
+    addr = IPAddr.new(l)
+    netmask = IPAddr.new('255.255.255.255').mask(addr.prefix)
+    options['localnet'].push "#{addr}/#{netmask}"
+  end
+
+  opts.on '-xPROXY', '--proxy PROXY', 'proxy URI' do |x|
+    options['proxies'].push URI.parse(x)
+  end
+
+  opts.on '-h', '--help', 'print this help' do
+    puts opts
+    exit 1
+  end
+end
+
+parser.order! do |opt|
+  parser.terminate opt
+end
+
+file = Tempfile.new('proxychains.conf')
+begin
+  file.puts options['chain_type']
+  unless options['chain_length'].nil?
+    file.puts "chain_len = #{options['chain_length']}"
+  end
+
+  if options['quiet']
+    file.puts 'quiet_mode'
+  end
+
+  if options['proxy_dns']
+    file.puts 'proxy_dns'
+  end
+
+  unless options['remote_dns_subnet'].nil?
+    file.puts "remote_dns_subnet #{options['remote_dns_subnet']}"
+  end
+
+  unless options['tcp_connect_time_out'].nil?
+    file.puts "tcp_connect_time_out #{options['tcp_connect_time_out']}"
+  end
+
+  unless options['tcp_read_time_out'].nil?
+    file.puts "tcp_read_time_out #{options['tcp_read_time_out']}"
+  end
+
+  options['localnet'].each do |addr|
+    file.puts "localnet #{addr}"
+  end
+
+  if options['proxies'].length == 0
+    options['proxies'].push URI.parse('socks5://127.0.0.1:9050')
+  end
+
+  file.puts '[ProxyList]'
+  options['proxies'].each do |proxy|
+    unless ['http', 'socks4', 'socks5'].include? proxy.scheme
+      raise 'Invalid proxy scheme, only http, socks4 and socks5 are supported.'
+    end
+
+    if proxy.scheme.eql? 'socks4' and not proxy.userinfo.nil?
+      raise 'SOCKS4 does not support authentication'
+    end
+
+    file.puts [proxy.scheme, proxy.host, proxy.port, proxy.user, proxy.password] \
+      .compact \
+      .join "\t"
+  end
+
+  file.close
+  system 'proxychains4', '-f', file.path, *ARGV
+ensure
+  file.close unless file.closed?
+  file.unlink
+end
